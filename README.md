@@ -1,5 +1,7 @@
 # Payroll Processing Engine
 
+[![CI](https://github.com/DaQ-Ng/payroll-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/DaQ-Ng/payroll-engine/actions/workflows/ci.yml)
+
 A backend system that computes and posts payroll the way a real payroll or
 banking-adjacent system has to: **idempotent** (retrying a request never
 double-pays anyone), **atomic** (a failure partway through leaves zero
