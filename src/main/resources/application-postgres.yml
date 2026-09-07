@@ -1,0 +1,12 @@
+spring:
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:payroll}
+    driver-class-name: org.postgresql.Driver
+    username: ${DB_USER:payroll}
+    password: ${DB_PASSWORD:payroll}
+  jpa:
+    hibernate:
+      ddl-auto: validate
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
