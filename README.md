@@ -32,6 +32,12 @@ gives it something concrete and checkable to compute.
   second call returns the *same* result (`idempotentReplay: true`, HTTP
   200) instead of processing payroll again. See [Idempotency & concurrency
   design](#idempotency--concurrency-design) below for how.
+- **A client-supplied `Idempotency-Key` header** (Stripe-style), honored on
+  *any* POST endpoint — not just pay runs. Retry a request with the same
+  key and identical body and you get back the exact original response; the
+  same key with a different body is rejected (`422`) as a client bug, not
+  silently accepted. See [The `Idempotency-Key`
+  header](#the-idempotency-key-header) below.
 - **A balanced double-entry ledger** — every pay run posts real
   debit/credit entries (Payroll Expense, Employer Payroll Tax Expense,
   Federal Withholding Payable, FICA Payable, Cash), and `GET
@@ -113,6 +119,45 @@ specifically so their `@Transactional` annotations are real.
 at the same pay period simultaneously and asserts exactly one pay stub and
 exactly one YTD update result, no matter which thread "wins."
 
+## The `Idempotency-Key` header
+
+The pay-run idempotency described above is *business-level*: it's keyed on
+`payPeriodId` and only applies to `POST /api/pay-runs`. Real APIs a client
+actually integrates against (Stripe's is the canonical example) also need
+a *general-purpose* mechanism: a client that timed out waiting for a
+response has no way to know whether its POST landed, and needs to be able
+to retry *any* mutating call safely.
+
+Send an `Idempotency-Key: <client-generated-uuid>` header on any POST:
+
+```bash
+curl -X POST localhost:8080/api/pay-periods \
+  -H "X-API-Key: demo-local-key" \
+  -H "Idempotency-Key: 3f29b6c1-...-a1" \
+  -H "Content-Type: application/json" \
+  -d '{"startDate":"2024-07-01","endDate":"2024-07-14","payDate":"2024-07-19"}'
+```
+
+Repeat the exact same request (same key, same body) and you get back
+`201` with the *same* resource — no second pay period is created. Reuse
+the same key with a different body and you get `422` — the filter
+fingerprints the request (SHA-256 of method + path + body) specifically
+to catch that client bug rather than silently serving the wrong cached
+response.
+
+Implementation: [`IdempotencyKeyFilter`](src/main/java/com/payrollengine/config/IdempotencyKeyFilter.java)
+follows the same claim-then-complete shape as `PayRunClaimService` — insert
+a placeholder row keyed on the client's string (unique constraint does the
+real work under concurrency), forward the request, then fill in the
+response. A second request landing on that placeholder before the first
+completes gets `409` rather than a torn read of a half-finished response.
+See [`CachedBodyHttpServletRequest`](src/main/java/com/payrollengine/config/CachedBodyHttpServletRequest.java)
+for why a hand-rolled request wrapper was necessary here — Spring's
+built-in `ContentCachingRequestWrapper` only caches a request body
+*lazily*, as something downstream reads it, which doesn't work when the
+filter itself needs to read the body first to decide whether to forward
+the request at all.
+
 ## Tech stack
 
 Java 17, Spring Boot 3.3 (Web, Data JPA, Validation, Actuator), Flyway,
@@ -154,8 +199,9 @@ Then open `http://localhost:8080/swagger-ui.html`.
 docker compose up --build
 ```
 
-**Tests** (31 tests: tax-calculation unit tests, a full HTTP-to-database
-integration test, an idempotency-replay test, and the concurrency test):
+**Tests** (34 tests: tax-calculation unit tests, a full HTTP-to-database
+integration test, the pay-run idempotency-replay test, the `Idempotency-Key`
+header test, and the concurrency test):
 ```bash
 ./mvnw test
 ```
@@ -175,6 +221,10 @@ integration test, an idempotency-replay test, and the concurrency test):
   Documented as extensions below rather than silently ignored.
 - **API-key auth, not OAuth2/JWT.** Enough to show the API isn't wide
   open by default; a real deployment needs per-client scoped auth.
+- **The `Idempotency-Key` cache has a fixed response-body size (8000
+  chars) and never expires.** A production version would store larger
+  bodies without truncation and expire old keys after a retention window
+  (Stripe's is 24 hours) rather than keeping them forever.
 - **The claim-then-process race has a narrow window** where a second
   request can observe `PROCESSING` and get a `409` instead of a clean
   replay — by design, it must retry. `PayrollRunConcurrencyTest`'s retry
@@ -187,7 +237,6 @@ integration test, an idempotency-replay test, and the concurrency test):
 - Real IRS Pub 15-T table sourced at startup or per tax year
 - State tax and pre-tax deduction support (401k, health insurance)
 - OAuth2/JWT auth with per-client scopes
-- An idempotency-key header (client-supplied) instead of pay-period-as-key,
-  for finer-grained retries
+- Idempotency key expiry (TTL-based cleanup) instead of keeping every key forever
 - Outbox pattern / event publishing on `PayRun` completion for downstream
   systems (e.g. a notifications service)
